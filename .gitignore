@@ -129,3 +129,5 @@ dmypy.json
 
 Pipfile.lock
 Pipfile
+
+.vscode
