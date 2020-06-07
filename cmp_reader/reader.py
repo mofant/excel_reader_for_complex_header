@@ -138,80 +138,56 @@ class SheetType:
         self.nrow = sheet.nrows
         self.ncol = sheet.ncols
 
-    def chain_type_count(self, row_map_same_value_count: dict, current_type: int, last_index: int):
-        """链式反应，查找上一行的数据类型是否跟当前的相同，如果相同，计数加一，并递归往上查找。
-            递归慢，丢弃
-        Arguments:
-            row_map_same_value_count {dict} -- 每行中连续相同值的计数
-            current_type {int} -- 查找行当前的类型
-            last_index {int} -- 上一行的index
-        """
-        if last_index < 0:
-            return
-        last = row_map_same_value_count[last_index]
-        # 非空的不相同类型也返回
-        if last[0] != current_type and current_type != 6:
-            return
-        last[1] += 1
-        row_map_same_value_count[last_index] = last
-        self.chain_type_count(row_map_same_value_count,
-                              current_type, last_index - 1)
-
-    def process_pre_same_type(self,
-                              row_map_same_value_count: dict,
-                              current_type: int,
-                              current_row: int,
-                              col: int):
-        """回溯统计前面行中出现相同类型的次数。
+    def get_same_value_type_count(self, col_types: list, col: "sheet_col"):
+        """扫描一列的数据了下，获取每一行开始，其相同的数据类型数量
+        回溯统计前面行中出现相同类型的次数。
         相同类型的定义是： 
             数值和字符串数值是相同的。
             空白符匹配所有的类型。
             字符串和空字符串是相同的。
-
-
-        Arguments:
-            row_map_same_value_cout {dict} -- 行号与自此行开始相同的次数
-            current_type {int} -- 当前统计的数据类型。
-            current_row {int} -- 当前的行
-            col: 当前值的列
-        """
-        last_row = current_row - 1
-
-        while last_row >= 0:
-            is_match = False
-            last = row_map_same_value_count[last_row]
-
-            if last[0] == 2 and current_type == 1:
-                cell_value = self.sheet.cell(current_row, col).value
-                if cell_value.isdigit():
-                    is_match = True
-            elif current_type == 6:
-                is_match = True
-            elif last[0] == 1 and current_type == 0:
-                is_match = True
-            elif last[0] == current_type:
-                is_match = True
-
-            if not is_match:
-                return
-
-            last[1] += 1
-            row_map_same_value_count[last_row] = last
-            # row_map_same_value_count[last_row] = row_map_same_value_count[last_row] + 1
-            last_row -= 1
-
-    def get_same_value_type_count(self, col_types: list, col: "sheet_col"):
-        """扫描一列的数据了下，获取每一行开始，其相同的数据类型数量
+        现在存在的问题是：
+            1、空白的Unicode string应该与任何类型匹配。
+            2、空字符串应该与任何类型匹配。
+            3、空白的单元格应该任何类型匹配。
 
         Arguments:
             col_types {list} -- 一列的数据类型
+            col {int}   --- sheet 的列号
         """
         row_map_same_value_count = {}
-        for col_index, ctype in enumerate(col_types):
-            row_map_same_value_count[col_index] = [ctype, 0]
-            self.process_pre_same_type(
-                row_map_same_value_count, ctype, col_index, col)
-            # self.chain_type_count(row_map_same_value_count, ctype, col_index-1)
+        for col_index, current_type in enumerate(col_types):
+            row_map_same_value_count[col_index] = [current_type, 0]
+            index = 0
+            current_cell_value = self.sheet.cell(col_index, col).value
+            while index < col_index:
+                is_match = False
+                # 空白的unicode 与任何类型匹配。
+                temp_col_type_count = row_map_same_value_count[index]
+                if current_type == 1 and not current_cell_value:
+                    is_match = True
+                # 空白和空字符串与任何类型匹配。
+                elif current_type in [0, 6]:
+                    is_match = True
+                # 数字字符串和数字匹配
+                elif current_type == 1 and temp_col_type_count[0] == 2:
+                    if current_cell_value.isdigit():
+                        is_match = True
+                # 相等的时候
+                elif temp_col_type_count[0] == current_type:
+                    is_match = True
+                # 如果当前值是字符串或者数值或者日期或者是boolean，匹配以前的空字符.
+                elif current_type in [1, 2, 3, 4]:
+                    if temp_col_type_count[0] in [0, 6]:
+                        is_match = True
+                    elif temp_col_type_count[0] == 1:
+                        temp_col_value = self.sheet.cell(index, col).value
+                        if not temp_col_value:
+                            is_match = True
+
+                if is_match:
+                    temp_col_type_count[1] += 1
+                index += 1
+
         return row_map_same_value_count
 
     def get_same_value_type_row(self):
@@ -220,11 +196,14 @@ class SheetType:
         Arguments:
             sheet {xlrd.sheet} -- excel sheet
         """
-        nrows = self.sheet.nrows
+        # nrows = self.sheet.nrows
         ncols = self.sheet.ncols
 
+        # 列方向的类型数据。
         sheet_col_types = [
-            [self.sheet.cell(i, j).ctype for i in range(nrows)] for j in range(ncols)]
+            list(self.sheet.col_types(col)) for col in range(ncols)
+        ]
+
         row_map_same_value_count_list = []
         for col in range(ncols):
             row_map_same_value_count_list.append(
@@ -241,32 +220,72 @@ class SheetType:
             [value[1] for _, value in col.items()]
             for col in row_map_same_value_count_list
         ]
-        matrix = []
-        for row in range(self.nrow):
-            row_value = []
-            for col in range(self.ncol):
-                row_value.append(col_same_type_count_list[col][row])
-            matrix.append(row_value)
-        return matrix
 
-    def search_max_same_type_rows(self) -> list:
-        """查找最多连续相同数据类型的的行号。
+        return col_same_type_count_list
+
+    def _get_max_sub_continue_list(self, col_list: list) -> list:
+        """寻找数组中连续最长的子串(倒序)
+
+        Args:
+            col_list (list): 列相同类型统计数组
 
         Returns:
-            [int] -- 最多连续相同数据类型的开始行号
+            list: 连续最长子串的index list
         """
-        matrix = self.general_same_value_type_matrix()
+        col_continue_rows = []
+        index = 0
+        while index < len(col_list):
+            temp = []
+            temp.append(index)
+            for j in range(index+1, len(col_list)):
+                if j == len(col_list):
+                    break
+                pre = col_list[j]
+                bef = col_list[j - 1]
+                if bef - pre == 1:
+                    temp.append(j)
+                else:
+                    break
+            index = j
+            col_continue_rows.append(temp)
+            if j == len(col_list) - 1:
+                break
+        len_count = [len(each) for each in col_continue_rows]
+        max_count = max(len_count)
+        return col_continue_rows[len_count.index(max_count)]
+
+    def search_max_same_type_rows(self) -> list:
+        """查找最多连续相同数据类型的的行号数组。
+        查找实现逻辑：
+            1、获取每一列的的每个单元格的数据类型。
+            2、在
+
+        Returns:
+            [int] -- 最多连续相同数据类型的的行信息
+        """
+        col_matrix = self.general_same_value_type_matrix()
         # 每一列中数据类型连续最多的开始行号和连续次数
-        col_max_continue_type_rows = []
-        for col in range(self.ncol):
-            col_value = [[matrix[row][col], row] for row in range(self.nrow)]
-            max_count_row = max(col_value)
-            col_max_continue_type_rows.append(
-                {
-                    row for row in range(max_count_row[1], sum(max_count_row) + 1)
-                }
-            )
-        return list(reduce(lambda x, y: x & y, col_max_continue_type_rows))
+        col_max_sub_con_rows = []
+        for col_type_count in col_matrix:
+            max_sub_con_rows = self._get_max_sub_continue_list(col_type_count)
+            col_max_sub_con_rows.append(max_sub_con_rows)
+
+        # 从每列连续的行号中，找到较多相同行号的。
+        sub_con_lens = [len(each) for each in col_max_sub_con_rows]
+        same_len_counter = Counter(sub_con_lens)
+        most_same_len = same_len_counter.most_common()
+
+        most_same_type_rows = []
+        for con_len, _ in most_same_len:
+            # 校验长度相同列的和是否都是一致的。如果一致，他就是最合适的连续相同列。
+            col_max_sub_con_row_indexs = [index for index in range(
+                len(sub_con_lens)) if sub_con_lens[index] == con_len]
+            col_index_sum = [sum(col_max_sub_con_rows[index])
+                             for index in col_max_sub_con_row_indexs]
+            if len(set(col_index_sum)) == 1:
+                most_same_type_rows = col_max_sub_con_rows[col_max_sub_con_row_indexs[0]]
+                break
+        return most_same_type_rows
 
 
 class ColHeader:
@@ -278,6 +297,7 @@ class ColHeader:
         self.ncol = sheet.ncols
         self.col_header_rows = col_header_rows
         self.header_row = []  # 可能是大标题的行
+        self.strip = True
 
     def get_cell_XF(self, cell) -> "XF":
         """获取单元格的XF
@@ -386,11 +406,15 @@ class ColHeader:
                 # 如果不存在合并单元格，其值将有t型和自身值决定。
                 else:
                     cell_value = str(t_col_value) + str(cell_value)
-                
+
                 col_header += cell_value
-            #如果跟之前的col header重名，自动加上序号
+            # 如果跟之前的col header重名，自动加上序号
             if col_header in col_headers:
                 col_header += str(col)
+            if self.strip:
+                col_header = col_header.strip()
+                col_header = col_header.replace('\n', "")
+                col_header = col_header.replace(" ", "")
             col_headers.append(col_header)
         return col_headers
 
@@ -398,14 +422,65 @@ class ColHeader:
 class ExcelCompxReader:
     """读取带有复杂表头的Excel的数据。
     """
-    def __init__(self, file_path: str):
+
+    def __init__(self, file_path: str, strip: bool = True):
         self.file_path = file_path
+        self.strip = strip
 
     def _open_workbook(self):
         try:
-            self.workbook = xlrd.open_workbook(self.file_path, formatting_info=True)
+            self.workbook = xlrd.open_workbook(
+                self.file_path, formatting_info=True)
         except Exception:
             raise
+
+    def _get_continue_sub_list(self, data_list: list) -> list:
+        """获取数组中值连续的子数组。
+
+        Arguments:
+            data_list {list} -- 已经排好序的数组
+
+        Returns:
+            list -- 连续值的子数组。
+        """
+        sub_lists = []
+        index = 0
+        while index < len(data_list):
+            start_index = index
+            for sec_index in range(start_index+1, len(data_list)):
+                pre = data_list[sec_index]
+                bef = data_list[sec_index - 1]
+                # print(f"{pre} - {bef} = {pre - bef}")
+                if pre - bef == 1:
+                    continue
+                else:
+                    break
+            if sec_index == len(data_list) - 1:
+                sub_lists.append(data_list[start_index:])
+            else:
+                sub_lists.append(data_list[start_index: sec_index])
+            if index == sec_index:
+                index += 1
+            else:
+                index = sec_index
+            if index == len(data_list) - 1:
+                break
+        return sub_lists
+
+    def _get_continue_data_rows(self, data_rows: list) -> list:
+        """获得连续的最长的数据行号
+
+        Arguments:
+            data_rows {list} -- 数据行
+
+        Returns:
+            list -- 数据行
+        """
+        sub_lists = self._get_continue_sub_list(data_rows)
+        sub_lens = [len(sub) for sub in sub_lists]
+        max_value = max(sub_lens)
+        data_rows = sub_lists[sub_lens.index(max_value)]
+        return data_rows
 
     def _split_col_header_and_data_row(self,
                                        no_merge_rows: list,
@@ -415,12 +490,14 @@ class ExcelCompxReader:
         表头与数据的划分。
         1、没有合并的单元格的行与每个单元格均由边框以及相同连续值的行的交集。
         2、在三种情况中出现两次及以上的行号。
+        3、数据列一定是连续的行号，去除非连续的行号。
         """
         res_rows = no_merge_rows + containe_border_rows + same_type_rows
         row_count = Counter(res_rows)
         more_than_twich_row = [row for row,
                                count in row_count.items() if count >= 2]
         data_rows = sorted(more_than_twich_row)
+        data_rows = self._get_continue_data_rows(data_rows)
         header_rows = [row for row in range(data_rows[0])]
         return data_rows, header_rows
 
@@ -432,9 +509,11 @@ class ExcelCompxReader:
         """
         res = {}
         for index, col_header in enumerate(col_header_record):
-            # 去除空的列
+
             col_value = [self.sheet.cell(
                 row, index).value for row in data_rows]
+
+            # 去除空的列
             if not col_header:
                 if not all(col_value):
                     continue
@@ -449,7 +528,7 @@ class ExcelCompxReader:
 
         Returns:
             dict -- {"col_name": col_value_list}
-        """        
+        """
         self._open_workbook()
         if sheet_name:
             self.sheet = self.workbook.sheet_by_name(sheet_name)
@@ -472,6 +551,7 @@ class ExcelCompxReader:
 
         return self._get_col_data(col_header_record, data_rows)
 
+
 def read_excel(filename, sheet_name=None) -> dict:
     """从文件中读取一张带有复杂表头的sheet
 
@@ -483,6 +563,14 @@ def read_excel(filename, sheet_name=None) -> dict:
 
     Returns:
         dict -- {"col_header": value_list}
-    """    
+    """
     reader = ExcelCompxReader(filename)
     return reader.read_excel(sheet_name)
+
+
+if __name__ == "__main__":
+    file_path = "../test/excels/A1-01.xls"
+    # file_path = "../test/excels/test_border.xls"
+    # data = read_excel(file_path, "Sheet2")
+    data = read_excel(file_path)
+    print(data)
